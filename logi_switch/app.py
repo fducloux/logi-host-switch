@@ -57,22 +57,40 @@ class Switcher:
         self._recv = Receiver(path)
         return self._recv
 
+    def _drop_receiver(self):
+        if self._recv is not None:
+            try:
+                self._recv.close()
+            except Exception:
+                pass
+        self._recv = None
+        self._devices = None
+
     def switch_to(self, host_index: int):
         with self._lock:
-            recv = self._ensure_receiver()
-            if recv is None:
-                log.warning("no receiver found; is it plugged in?")
-                return
-            if self._devices is None:
-                self._devices = recv.paired_devices()
-            if not self._devices:
-                log.warning("receiver found but no paired devices responded")
-                self._devices = None  # allow retry on next press
-                return
-            results = recv.switch_all([d.slot for d in self._devices], host_index)
-            for dev in self._devices:
-                status = "sent" if results.get(dev.slot) else "no reply (device asleep?)"
-                log.info("host %d -> %s (slot %d): %s", host_index + 1, dev.name, dev.slot, status)
+            for attempt in (1, 2):
+                recv = self._ensure_receiver()
+                if recv is None:
+                    log.warning("no receiver found; is it plugged in?")
+                    return
+                try:
+                    if self._devices is None:
+                        self._devices = recv.paired_devices()
+                    if not self._devices:
+                        log.warning("receiver found but no paired devices responded")
+                        self._devices = None  # allow retry on next press
+                        return
+                    results = recv.switch_all([d.slot for d in self._devices], host_index)
+                    for dev in self._devices:
+                        status = "sent" if results.get(dev.slot) else "no reply (device asleep?)"
+                        log.info("host %d -> %s (slot %d): %s", host_index + 1, dev.name, dev.slot, status)
+                    return
+                except Exception as e:
+                    # USB path went stale (receiver unplugged/re-enumerated, sleep/wake, etc).
+                    # Drop the cached handle and reconnect once before giving up.
+                    log.warning("receiver connection lost (%s); reconnecting", e)
+                    self._drop_receiver()
+            log.warning("still unreachable after reconnect attempt")
 
 
 class HotkeyListener:
